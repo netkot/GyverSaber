@@ -29,15 +29,15 @@
 */
 
 // ---------------------------- НАСТРОЙКИ -------------------------------
-#define NUM_LEDS 30         // число МИКРОСХЕМ на ленте
+#define NUM_LEDS 28         // число МИКРОСХЕМ на ленте
 #define BTN_TIMEOUT 800     // задержка кнопки для удерживания (миллисекунды)
 #define BRIGHTNESS 255      // максимальная яркость ленты (0 - 255)
 
 #define SWING_TIMEOUT 500   // таймаут между двумя взмахами
 #define SWING_L_THR 150     // порог угловой скорости для взмаха
 #define SWING_THR 300       // порог угловой скорости для сильного взмаха
-#define STRIKE_THR 150      // порог ускорения для распознавания удара
-#define STRIKE_S_THR 320    // порог ускорения для распознавания сильного удара
+#define STRIKE_THR 100      // порог ускорения для распознавания удара
+#define STRIKE_S_THR 200    // порог ускорения для распознавания сильного удара
 #define FLASH_DELAY 80      // время вспышки при ударе (миллисекунды)
 
 #define BLINK_ALLOW 1       // разрешить мерцание (1 - разрешить, 0 - запретить)
@@ -95,7 +95,6 @@ byte nowColor, red, green, blue, redOffset, greenOffset, blueOffset;
 boolean eeprom_flag, swing_flag, swing_allow, strike_flag, HUMmode;
 float voltage;
 int blinkOffset;
-// Hummude: 0 - генерация, 1 - с карты
 // ------------------------------ ПЕРЕМЕННЫЕ ---------------------------------
 
 // --------------------------------- ЗВУКИ УДАРОВ ----------------------------------
@@ -156,11 +155,12 @@ char BUFFER[10];
 
 void setup() {
   FastLED.addLeds<WS2811, LED_PIN, GRB>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
-  FastLED.setBrightness(100);  // яроксть ленты 40%
+  FastLED.setBrightness(100);  // яркость ленты 40%
   setAll(0, 0, 0);             // ставим чёрный цвет ленты
 
   Wire.begin();
   Serial.begin(9600);
+
 
   // ---- НАСТРОЙКА ПИНОВ ----
   pinMode(BTN, INPUT_PULLUP);
@@ -200,11 +200,16 @@ void setup() {
   } else {                       // если это первый запуск
     EEPROM.write(0, 0);          // обнуляем ячейку
     EEPROM.write(1, 0);          // обнуляем ячейку
-    nowColor = 0;                // цвет нулевой
+    nowColor = 3;
   }
+
+  HUMmode = 1; // 0 - wav, 1 - трещалка
+  bzzz_flag = 1;                 // запретить включение трещалки
+  tmrpcm.disable();              // выключаем звук
 
   setColor(nowColor);                      // устанавливаем цвет клинка
   byte capacity = voltage_measure();       // получить процент заряда аккумулятора
+
   capacity = map(capacity, 100, 0, (NUM_LEDS / 2 - 1), 1);  // перевести в длину клинка
   if (DEBUG) {
     Serial.print(F("Battery: "));
@@ -234,12 +239,18 @@ void loop() {
 
 void btnTick() {
   btnState = !digitalRead(BTN);    // если кнопка нажата
+
   if (btnState && !btn_flag) {
     if (DEBUG) Serial.println(F("BTN PRESS"));
     btn_flag = 1;
     btn_counter++;                 // прибавить счётчик нажатий
     btn_timer = millis();
+
+    if (DEBUG) Serial.print(F("BTN COUNT: "));
+    if (DEBUG) Serial.println(btn_counter);
+
   }
+
   if (!btnState && btn_flag) {     // если была нажата и отпущена
     btn_flag = 0;
     hold_flag = 0;                 // сбросить флаг удержания
