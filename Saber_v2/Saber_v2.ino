@@ -29,9 +29,9 @@
 */
 
 // ---------------------------- НАСТРОЙКИ -------------------------------
-#define NUM_LEDS 28         // число МИКРОСХЕМ на ленте
+#define NUM_LEDS 58         // число МИКРОСХЕМ на ленте
 #define BTN_TIMEOUT 800     // задержка кнопки для удерживания (миллисекунды)
-#define BRIGHTNESS 255      // максимальная яркость ленты (0 - 255)
+#define BRIGHTNESS 255       // максимальная яркость ленты (0 - 255)
 
 #define SWING_TIMEOUT 500   // таймаут между двумя взмахами
 #define SWING_L_THR 150     // порог угловой скорости для взмаха
@@ -46,19 +46,27 @@
 
 #define R1 100000           // сопротивление резистора делителя    
 #define R2 51000            // сопротивление резистора делителя
-#define BATTERY_SAFE 1      // не включаться и выключаться при низком заряде АКБ (1 - разрешить, 0 - запретить)
+#define BATTERY_SAFE 0      // не включаться и выключаться при низком заряде АКБ (1 - разрешить, 0 - запретить)
 
-#define DEBUG 1             // вывод в порт отладочной информации (1 - разрешить, 0 - запретить)
+#define DEBUG 0             // вывод в порт отладочной информации (1 - разрешить, 0 - запретить)
 // ---------------------------- НАСТРОЙКИ -------------------------------
 
 #define LED_PIN 6           // пин, куда подключен DIN ленты
-#define BTN 4               // пин кнопки
+#define BTN_BLACK 4         // пин кнопки
+#define POTEN_BTN 7         // кнопка потенциометра
+#define POTEN_1 2         // потенциометр пин 1
+#define POTEN_2 3         // потенциометр пин 2
+#define ENCODER_DO_NOT_USE_INTERRUPTS
+
+
+#define BTN_RED 5         // пин кнопки
 #define IMU_GND A1          // земля акселерометра
 #define SD_GND A0           // земля карты
 #define VOLT_PIN A6         // пин вольтметра
 #define BTN_LED 10           // светодиод кнопки
 
 // -------------------------- БИБЛИОТЕКИ ---------------------------
+#include <Encoder.h>
 #include <avr/pgmspace.h>   // библиотека для работы с ПРОГМЕМ
 #include <SD.h>             // библиотека для работы с SD картой
 #include <TMRpcm.h>         // библиотека для работы с аудио
@@ -84,17 +92,21 @@ unsigned long ACC, GYR, COMPL;
 int gyroX, gyroY, gyroZ, accelX, accelY, accelZ, freq, freq_f = 20;
 float k = 0.2;
 unsigned long humTimer = -9000, mpuTimer, nowTimer;
-int stopTimer;
+int stopTimer, effect_mode = 0;
 boolean bzzz_flag, ls_chg_state, ls_state;
-boolean btnState, btn_flag, hold_flag;
+boolean btnState, btn_flag, hold_flag, potenBtnState, poten_btn_flag;
 byte btn_counter;
-unsigned long btn_timer, blink_timer, swing_timer, swing_timeout, battery_timer, bzzTimer;
+unsigned long btn_timer, poten_btn_timer, poten_timer, blink_timer, swing_timer, swing_timeout, battery_timer, bzzTimer;
 byte nowNumber;
 byte LEDcolor;  // 0 - красный, 1 - синий, 2 - зелёный, 3 - розовый, 4 - жёлтый
 byte nowColor, red, green, blue, redOffset, greenOffset, blueOffset;
 boolean eeprom_flag, swing_flag, swing_allow, strike_flag, HUMmode;
 float voltage;
 int blinkOffset;
+long position  = -999;
+long last_position  = -999;
+long poten_value  = 0;
+long poten_value_mapped  = 0;
 // ------------------------------ ПЕРЕМЕННЫЕ ---------------------------------
 
 // --------------------------------- ЗВУКИ УДАРОВ ----------------------------------
@@ -151,11 +163,14 @@ const char* const swings_L[] PROGMEM  = {        // создаём "массив
 int swing_time_L[8] = {636, 441, 772, 702};
 
 char BUFFER[10];
+
+Encoder myEnc(2, 3);
+
 // --------------------------------- ЗВУКИ УДАРОВ ---------------------------------
 
 void setup() {
   FastLED.addLeds<WS2811, LED_PIN, GRB>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
-  FastLED.setBrightness(100);  // яркость ленты 40%
+  FastLED.setBrightness(BRIGHTNESS);  // яркость ленты
   setAll(0, 0, 0);             // ставим чёрный цвет ленты
 
   Wire.begin();
@@ -163,7 +178,12 @@ void setup() {
 
 
   // ---- НАСТРОЙКА ПИНОВ ----
-  pinMode(BTN, INPUT_PULLUP);
+  pinMode(BTN_BLACK, INPUT_PULLUP);
+
+  pinMode(POTEN_BTN, INPUT_PULLUP);
+  pinMode(POTEN_1, INPUT_PULLUP);
+  pinMode(POTEN_2, INPUT_PULLUP);
+
   pinMode(IMU_GND, OUTPUT);
   pinMode(SD_GND, OUTPUT);
   pinMode(BTN_LED, OUTPUT);
@@ -187,6 +207,8 @@ void setup() {
   tmrpcm.speakerPin = 9;
   tmrpcm.setVolume(5);
   tmrpcm.quality(1);
+  
+  
   if (DEBUG) {
     if (SD.begin(8)) Serial.println(F("SD OK"));
     else Serial.println(F("SD fail"));
@@ -200,11 +222,13 @@ void setup() {
   } else {                       // если это первый запуск
     EEPROM.write(0, 0);          // обнуляем ячейку
     EEPROM.write(1, 0);          // обнуляем ячейку
-    nowColor = 3;
   }
 
+  // Не читаем память, цвет и режим звука установлены жестко
+  nowColor = 2; // красный
   HUMmode = 1; // 0 - wav, 1 - трещалка
-  bzzz_flag = 1;                 // запретить включение трещалки
+
+  bzzz_flag = 0;                 // запретить включение трещалки
   tmrpcm.disable();              // выключаем звук
 
   setColor(nowColor);                      // устанавливаем цвет клинка
@@ -216,12 +240,15 @@ void setup() {
     Serial.println(capacity);
   }
 
+/*
   for (char i = 0; i <= capacity; i++) {   // отобразить заряд аккумулятора как длину клинка
     setPixel(i, red, green, blue);
     setPixel((NUM_LEDS - 1 - i), red, green, blue);
     FastLED.show();
     delay(25);
   }
+*/
+
   delay(1000);                         // секунда для отображения заряда акума
   setAll(0, 0, 0);                     // показываем чёрный цвет ленты
   FastLED.setBrightness(BRIGHTNESS);   // возвращаем яркость
@@ -234,11 +261,75 @@ void loop() {
   btnTick();          // опрос и отработка кнопки
   strikeTick();       // отработка удара
   swingTick();        // отработка взмаха
-  batteryTick();      // проверка акума
+  //batteryTick();      // проверка акума
 }
 
 void btnTick() {
-  btnState = !digitalRead(BTN);    // если кнопка нажата
+  
+  long newPos = myEnc.read();
+  if (newPos != position && (millis() - poten_timer) > 300) { 
+    position = newPos;
+
+    //if (DEBUG) Serial.print(F("POTENTIOMETER POSITION: "));
+    //if (DEBUG) Serial.println(position);
+
+
+    if (last_position > position) {
+      poten_value++;
+    }
+    if (last_position < position) {
+      poten_value--;
+    }
+    
+    if (poten_value < 0) {
+      poten_value = 20;
+    }
+      
+    if (poten_value > 20) {
+      poten_value = 0;
+    }
+
+    poten_value_mapped = map(poten_value, 0, 20, 0, 6);
+
+
+    if (DEBUG) Serial.print(F("POTENTIOMETER VALUE: "));
+    if (DEBUG) Serial.println(poten_value_mapped);
+
+    last_position = position;
+    poten_timer = millis();
+
+    nowColor = poten_value_mapped;      // сменить цвет    
+    setColor(nowColor);                 // установить цвет
+    if (ls_state) {
+      setAll(red, green, blue);           // включить цвет    
+    }
+    eeprom_flag = 1;                    // разрешить запись выбранного цвета в память  
+    effect_mode = 0;  
+  }
+
+
+  btnState = !digitalRead(BTN_BLACK);    // если кнопка нажата
+  potenBtnState = !digitalRead(POTEN_BTN);    // если кнопка потенциометра нажата
+
+
+  if (potenBtnState && (millis() - poten_btn_timer) > 700) {
+    //poten_btn_flag = 1;
+    
+    if (DEBUG) Serial.println(F("POTENTIOMETER BTN PRESS"));
+    
+    if (ls_state) {
+      effect_mode++;
+      if (effect_mode > 10) {
+        effect_mode = 0;
+        }
+      //setEffectMode();
+    }
+    if (DEBUG) Serial.print(F("EFFECT_MODE: "));
+    if (DEBUG) Serial.println(effect_mode);
+    
+    poten_btn_timer = millis();
+  }
+
 
   if (btnState && !btn_flag) {
     if (DEBUG) Serial.println(F("BTN PRESS"));
@@ -254,14 +345,23 @@ void btnTick() {
   if (!btnState && btn_flag) {     // если была нажата и отпущена
     btn_flag = 0;
     hold_flag = 0;                 // сбросить флаг удержания
+
+    ls_chg_state = 1;     // включить/выключить меч
+    hold_flag = 1;
+    btn_counter = 0;    
   }
+
   // если кнопка удерживается
+  /*
   if (btn_flag && btnState && (millis() - btn_timer > BTN_TIMEOUT) && !hold_flag) {
     ls_chg_state = 1;     // включить/выключить меч
     hold_flag = 1;
     btn_counter = 0;
   }
+  */
+
   // если кнопка была нажата несколько раз до таймаута
+  /*
   if ((millis() - btn_timer > BTN_TIMEOUT) && (btn_counter != 0)) {
     if (ls_state) {
       if (btn_counter == 3) {               // если число нажатий равно 3
@@ -271,21 +371,41 @@ void btnTick() {
         setAll(red, green, blue);           // включить цвет
         eeprom_flag = 1;                    // разрешить запись выбранного цвета в память
       }
-      if (btn_counter == 5) {               // если число нажатий равно 3
-        HUMmode = !HUMmode;
-        if (HUMmode) {
-          noToneAC();                       // вырубить трещалку
-          tmrpcm.play("HUM.wav");           // грать гудение
-        } else {
-          tmrpcm.disable();                 // выключаем звук
-          toneAC(freq_f);                   // трещать
-        }
-        eeprom_flag = 1;                    // разрешить запись память
-      }
     }
     btn_counter = 0;
   }
+  */
 }
+
+/*
+void setEffectMode() {
+  // Радуга
+  if (effect_mode == 1){
+    if (DEBUG) Serial.println(F("SET EFFECT 1 - RAINBOW"));
+
+    int red_arr[7]   = {255, 255, 0  , 255, 255, 255, 255};
+    int green_arr[7] = {255, 0  , 255, 255, 255, 255, 255};
+    int blue_arr[7]  = {0,   255, 255, 255, 255, 255, 255};
+
+    for (char i = 0; i <= (NUM_LEDS / 4 - 1); i++) {  // включить все диоды выбранным цветом
+      int nx_red   = red_arr[i];
+      int nx_green = green_arr[i];
+      int nx_blue  = blue_arr[i];
+
+      setPixel(i, red, green, blue);
+      setPixel((NUM_LEDS / 2) - i - 1, nx_red, nx_green, nx_blue);
+      setPixel(NUM_LEDS / 2 + i, nx_red, nx_green, nx_blue);
+      setPixel(NUM_LEDS - i - 1, nx_red, nx_green, nx_blue);
+      FastLED.show();
+      delay(100);
+    }
+
+  }
+  //delay (5000);
+}
+
+*/
+
 
 void on_off_sound() {                // блок вкл/выкл меча со звуками
   if (ls_chg_state) {                // если есть запрос на изменение состояния меча
@@ -471,21 +591,24 @@ void setAll(byte red, byte green, byte blue) {
   FastLED.show();
 }
 
-// плавное включение меча
 void light_up() {
-  for (char i = 0; i <= (NUM_LEDS / 2 - 1); i++) {          // включить все диоды выбранным цветом
+  for (char i = 0; i <= (NUM_LEDS / 4 - 1); i++) {  // включить все диоды выбранным цветом
     setPixel(i, red, green, blue);
-    setPixel((NUM_LEDS - 1 - i), red, green, blue);
+    setPixel((NUM_LEDS / 2) - i - 1, red, green, blue);
+    setPixel(NUM_LEDS / 2 + i, red, green, blue);
+    setPixel(NUM_LEDS - i - 1, red, green, blue);
     FastLED.show();
     delay(25);
   }
 }
 
-// плавное выключение меча
+
 void light_down() {
-  for (char i = (NUM_LEDS / 2 - 1); i >= 0; i--) {      // выключить все диоды
+  for (char i = (NUM_LEDS / 4); i >= 0; i--) {      // выключить все диоды
     setPixel(i, 0, 0, 0);
-    setPixel((NUM_LEDS - 1 - i), 0, 0, 0);
+    setPixel((NUM_LEDS / 2) - i - 1, 0, 0, 0);
+    setPixel(NUM_LEDS / 2 + i, 0, 0, 0);
+    setPixel(NUM_LEDS - i - 1, 0, 0, 0);
     FastLED.show();
     delay(25);
   }
